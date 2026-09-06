@@ -31,6 +31,19 @@ from datetime import timedelta, datetime
 import json, io, os, uuid
 from collections import Counter, defaultdict
 
+# Optional heavy dependencies — not required for core functionality
+try:
+    import torch
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
+
+try:
+    import onnxruntime as ort
+    ONNX_AVAILABLE = True
+except ImportError:
+    ONNX_AVAILABLE = False
+
 app = Flask(__name__)
 CORS(app, origins=['https://corpustat.com', 'https://www.corpustat.com',
                    'http://localhost:5173', 'http://localhost:1420',
@@ -578,12 +591,13 @@ def classify():
     Body: { "measurements": { "GOL": 185, ... }, "sex_estimate": 0.7,
             "fingerprint": { "SameAVG": 0.48, "Diff1": 0.45, ... } }
     """
+    if not ONNX_AVAILABLE:
+        return jsonify(error='ONNX runtime not available. '
+                             'Use local browser inference.'), 503
     try:
-        import onnxruntime as ort
         import numpy as np
     except ImportError:
-        return jsonify(error='ONNX runtime not installed on server. '
-                             'Use local browser inference.'), 503
+        return jsonify(error='numpy not available.'), 503
 
     data  = request.json or {}
     meas  = data.get('measurements', {})
@@ -593,7 +607,7 @@ def classify():
     # ── Fingerprint age (if model file present) ───────────────────────────
     model_path = 'models/mlp_fingerprint.onnx'
     if fp.get('SameAVG') and os.path.exists(model_path):
-        sess = ort.InferenceSession(model_path)
+        sess = ort.InferenceSession(model_path)  # ort imported via ONNX_AVAILABLE check
         same_avg = float(fp['SameAVG'])
         sex      = float(data.get('sex_for_fingerprint', 0.5))
         feat = np.array([[same_avg,
@@ -626,6 +640,9 @@ def inverse_shrinkage():
     sex  = float(data.get('sex', 0.5))
     n_mc = min(int(data.get('n_mc', 100)), 500)
     _log(int(get_jwt_identity()), 'inverse_pinn', {'n_mc': n_mc})
+    if not TORCH_AVAILABLE:
+        return jsonify(error='Torch not available on this server. '
+                             'Run inverse PINN locally.'), 503
     try:
         from inverse_pinn_shrinkage import estimate_shrinkage, PINN
         import torch
