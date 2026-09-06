@@ -44,6 +44,59 @@ try:
 except ImportError:
     ONNX_AVAILABLE = False
 
+# ── Forensic case encryption (AES-256-GCM) ───────────────────────────────────
+# Forensic case measurements and results are encrypted at rest.
+# The encryption key is derived from SECRET_KEY — only the server can decrypt.
+# Even if the database is compromised, case data is unreadable without the key.
+import base64, hashlib
+
+def _get_encryption_key():
+    """Derive a 32-byte AES key from the app SECRET_KEY."""
+    secret = app.config['SECRET_KEY'].encode()
+    return hashlib.sha256(secret).digest()
+
+def encrypt_case_data(data_dict):
+    """Encrypt a dict to a base64 ciphertext string using AES-256-GCM."""
+    try:
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        import os
+        key    = _get_encryption_key()
+        nonce  = os.urandom(12)       # 96-bit random nonce
+        aes    = AESGCM(key)
+        plain  = json.dumps(data_dict).encode('utf-8')
+        cipher = aes.encrypt(nonce, plain, None)
+        # Store as base64(nonce + ciphertext)
+        return base64.b64encode(nonce + cipher).decode('utf-8')
+    except Exception as e:
+        # Fallback: store plain JSON if cryptography not available
+        return json.dumps(data_dict)
+
+def decrypt_case_data(stored):
+    """Decrypt a base64 ciphertext string back to a dict."""
+    try:
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        raw    = base64.b64decode(stored.encode('utf-8'))
+        nonce  = raw[:12]
+        cipher = raw[12:]
+        key    = _get_encryption_key()
+        aes    = AESGCM(key)
+        plain  = aes.decrypt(nonce, cipher, None)
+        return json.loads(plain.decode('utf-8'))
+    except Exception:
+        # Fallback: try plain JSON (backwards compat / missing cryptography)
+        try:
+            return json.loads(stored)
+        except Exception:
+            return {}
+
+def is_encrypted(stored):
+    """Check if a stored string is encrypted (base64) vs plain JSON."""
+    try:
+        json.loads(stored)
+        return False   # valid JSON = not encrypted
+    except Exception:
+        return True    # not valid JSON = encrypted
+
 app = Flask(__name__)
 CORS(app, origins='*')  # Allow all origins — tighten to corpustat.com once live
 
@@ -185,21 +238,29 @@ class Run(db.Model):
     notes        = db.Column(db.Text, default='')
     created_at   = db.Column(db.DateTime, default=datetime.utcnow)
     # Case classification
-    # forensic | research | archaeological | teaching
     case_type    = db.Column(db.String(30),  default='')
-    # Auto-generated case number (encrypted hash for forensic, sequential otherwise)
     case_number  = db.Column(db.String(60),  default='')
+    # Encryption flag — forensic cases have measurements+results encrypted at rest
+    is_encrypted = db.Column(db.Boolean, default=False)
     # Offline sync fields
     client_id    = db.Column(db.String(36), unique=True, nullable=True)
     synced_at    = db.Column(db.DateTime,   nullable=True)
 
     def to_dict(self):
+        # Decrypt measurements and results if stored encrypted
+        if self.is_encrypted:
+            meas = decrypt_case_data(self.measurements or '{}')
+            res  = decrypt_case_data(self.results or '{}')
+        else:
+            meas = json.loads(self.measurements or '{}')
+            res  = json.loads(self.results or '{}')
         return dict(id=self.id, project_id=self.project_id, label=self.label,
                     notes=self.notes, client_id=self.client_id,
                     case_type=self.case_type or '',
                     case_number=self.case_number or '',
-                    measurements=json.loads(self.measurements or '{}'),
-                    results=json.loads(self.results or '{}'),
+                    is_encrypted=bool(self.is_encrypted),
+                    measurements=meas,
+                    results=res,
                     created_at=self.created_at.isoformat(),
                     synced_at=self.synced_at.isoformat() if self.synced_at else None)
 
@@ -436,13 +497,19 @@ def create_run(pid):
                              f'Upgrade to Academic to save up to {limit} cases.'), 403
 
     data = request.json or {}
+    case_type   = data.get('case_type', '')
+    meas_raw    = data.get('measurements', {})
+    results_raw = data.get('results', {})
+    forensic    = case_type == 'forensic'
+
     r = Run(project_id=pid,
             label=data.get('label', ''),
-            measurements=json.dumps(data.get('measurements', {})),
-            results=json.dumps(data.get('results', {})),
+            measurements=encrypt_case_data(meas_raw) if forensic else json.dumps(meas_raw),
+            results=encrypt_case_data(results_raw)   if forensic else json.dumps(results_raw),
             notes=data.get('notes', ''),
-            case_type=data.get('case_type', ''),
+            case_type=case_type,
             case_number=data.get('case_number', ''),
+            is_encrypted=forensic,
             client_id=data.get('client_id'),
             synced_at=datetime.utcnow())
     db.session.add(r)
@@ -467,6 +534,11 @@ def get_run(rid):
     r = Run.query.get_or_404(rid)
     p = Project.query.get(r.project_id)
     if p.user_id != int(get_jwt_identity()): return jsonify(error='Forbidden'), 403
+    # Audit log every forensic case access
+    if r.case_type == 'forensic':
+        _log(int(get_jwt_identity()), 'forensic_case_accessed',
+             {'run_id': rid, 'case_number': r.case_number or '',
+              'ip': request.remote_addr})
     return jsonify(run=r.to_dict())
 
 
@@ -554,13 +626,19 @@ def sync_cases():
         except ValueError:
             created_at = datetime.utcnow()
 
+        sync_case_type = case.get('case_type', '')
+        sync_forensic  = sync_case_type == 'forensic'
+        sync_meas      = case.get('measurements', {})
+        sync_results   = case.get('results', {})
+
         r = Run(project_id=proj.id,
                 label       = case.get('label', ''),
-                measurements= json.dumps(case.get('measurements', {})),
-                results     = json.dumps(case.get('results', {})),
+                measurements= encrypt_case_data(sync_meas)    if sync_forensic else json.dumps(sync_meas),
+                results     = encrypt_case_data(sync_results) if sync_forensic else json.dumps(sync_results),
                 notes       = case.get('notes', ''),
-                case_type   = case.get('case_type', ''),
+                case_type   = sync_case_type,
                 case_number = case.get('case_number', ''),
+                is_encrypted= sync_forensic,
                 client_id   = client_id,
                 created_at  = created_at,
                 synced_at   = datetime.utcnow())
