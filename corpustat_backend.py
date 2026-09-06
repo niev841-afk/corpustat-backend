@@ -45,9 +45,7 @@ except ImportError:
     ONNX_AVAILABLE = False
 
 app = Flask(__name__)
-CORS(app, origins=['https://corpustat.com', 'https://www.corpustat.com',
-                   'http://localhost:5173', 'http://localhost:1420',
-                   'tauri://localhost'])  # Tauri desktop app origin
+CORS(app, origins='*')  # Allow all origins — tighten to corpustat.com once live
 
 app.config.update(
     SECRET_KEY               = os.environ.get('SECRET_KEY', 'change-me-in-production'),
