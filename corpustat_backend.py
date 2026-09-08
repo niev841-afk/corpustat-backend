@@ -119,9 +119,10 @@ jwt = JWTManager(app)
 # ── Tier limits ──────────────────────────────────────────────────────────────
 
 TIER_LIMITS = {
-    'free':          {'max_cases': 0,    'export': False, 'pdf': False},
-    'academic':      {'max_cases': 200,  'export': True,  'pdf': True},
-    'institutional': {'max_cases': 99999,'export': True,  'pdf': True},
+    'free':           {'max_cases': 0,     'export': False, 'pdf': False, 'templates': False},
+    'academic':       {'max_cases': 200,   'export': True,  'pdf': True,  'templates': False},
+    'professional':   {'max_cases': 1000,  'export': True,  'pdf': True,  'templates': True},
+    'institutional':  {'max_cases': 99999, 'export': True,  'pdf': True,  'templates': True},
 }
 
 
@@ -771,6 +772,8 @@ def stripe_webhook():
         plan_name = sub['items']['data'][0]['price']['nickname'].lower()
         if 'institutional' in plan_name:
             u.tier = 'institutional'
+        elif 'professional' in plan_name:
+            u.tier = 'professional'
         elif 'academic' in plan_name:
             u.tier = 'academic'
         # Set expiry to end of current period
