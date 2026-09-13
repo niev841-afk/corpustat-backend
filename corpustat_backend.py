@@ -167,8 +167,13 @@ class User(db.Model):
     def check_password(self, pw):   return check_password_hash(self.password_hash, pw)
 
     def effective_tier(self):
-        """Return current tier, downgrading to free if subscription expired."""
-        if self.tier in ('academic', 'institutional'):
+        """Return current tier. TESTING MODE: all registered users get institutional."""
+        # ── TESTING MODE — remove this block before public launch ──────────
+        TESTING_MODE = True
+        if TESTING_MODE and self.id:
+            return 'institutional'
+        # ───────────────────────────────────────────────────────────────────
+        if self.tier in ('academic', 'professional', 'institutional'):
             if self.tier_expires_at and datetime.utcnow() > self.tier_expires_at:
                 return 'free'
         return self.tier or 'free'
