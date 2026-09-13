@@ -791,6 +791,50 @@ def stripe_webhook():
 
 # ── Admin ──────────────────────────────────────────────────────────────────────
 
+@app.route('/admin/set-tier', methods=['POST'])
+def admin_set_tier():
+    """
+    Manually set a user's tier. Admin only.
+    Body: { "email": "user@example.com", "tier": "academic" }
+    Header: X-Admin-Token: your_admin_token
+    """
+    tok = request.headers.get('X-Admin-Token', '')
+    if tok != ADMIN_TOKEN:
+        return jsonify(error='Forbidden'), 403
+    data = request.json or {}
+    email = data.get('email', '').lower().strip()
+    tier  = data.get('tier', '').lower().strip()
+    if tier not in ('free', 'academic', 'professional', 'institutional'):
+        return jsonify(error=f'Invalid tier: {tier}'), 400
+    u = User.query.filter_by(email=email).first()
+    if not u:
+        return jsonify(error=f'No user found with email: {email}'), 404
+    u.tier = tier
+    # Set expiry 1 year from now for paid tiers
+    if tier != 'free':
+        from datetime import timedelta
+        u.tier_expires_at = datetime.utcnow() + timedelta(days=365)
+    else:
+        u.tier_expires_at = None
+    db.session.commit()
+    _log(u.id, 'admin_tier_change', {'tier': tier, 'admin': True})
+    return jsonify(ok=True, user=u.profile_dict())
+
+
+@app.route('/admin/users', methods=['GET'])
+def admin_list_users():
+    """List all users with their tiers. Admin only."""
+    tok = request.headers.get('X-Admin-Token', '')
+    if tok != ADMIN_TOKEN:
+        return jsonify(error='Forbidden'), 403
+    users = User.query.order_by(User.created_at.desc()).all()
+    return jsonify(users=[{
+        'id': u.id, 'email': u.email, 'username': u.username,
+        'tier': u.effective_tier(), 'created_at': u.created_at.isoformat(),
+        'login_count': u.login_count, 'case_count': sum(len(p.runs) for p in u.projects)
+    } for u in users])
+
+
 @app.route('/admin/stats', methods=['GET'])
 def admin_stats():
     tok = request.headers.get('X-Admin-Token', '')
